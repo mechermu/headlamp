@@ -990,6 +990,43 @@ func TestGetOidcCallbackURL(t *testing.T) {
 	}
 }
 
+func TestOIDCTokenPollEndpoint(t *testing.T) {
+	cache := cache.New[interface{}]()
+	kubeConfigStore := kubeconfig.NewContextStore()
+
+	c := HeadlampConfig{
+		HeadlampConfig: &headlampconfig.HeadlampConfig{
+			HeadlampCFG: &headlampconfig.HeadlampCFG{
+				UseInCluster:    false,
+				KubeConfigStore: kubeConfigStore,
+			},
+			Cache:            cache,
+			TelemetryConfig:  GetDefaultTestTelemetryConfig(),
+			TelemetryHandler: &telemetry.RequestHandler{},
+		},
+	}
+
+	handler := createHeadlampHandler(&c)
+
+	// Test: poll without cluster parameter returns 400
+	req := httptest.NewRequest("GET", "/oidc-token-poll", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	// Without cluster query parameter, gorilla/mux won't match the route (405 or 404)
+	assert.NotEqual(t, http.StatusOK, rec.Code)
+
+	// Test: poll with cluster parameter but no pending token returns 202
+	req = httptest.NewRequest("GET", "/oidc-token-poll?cluster=test-cluster", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusAccepted, rec.Code)
+
+	var pendingResult map[string]string
+	err := json.Unmarshal(rec.Body.Bytes(), &pendingResult)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", pendingResult["status"])
+}
+
 func TestOIDCTokenRefreshMiddleware(t *testing.T) {
 	kubeConfigStore := kubeconfig.NewContextStore()
 	config := &HeadlampConfig{
