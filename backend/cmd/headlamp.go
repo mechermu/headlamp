@@ -873,9 +873,11 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 		// Set auth cookie (used by web mode and also by the system browser response in desktop mode)
 		auth.SetTokenCookie(w, r, oauthConfig.Cluster, rawUserToken, config.BaseURL, config.SessionTTL)
 
-		// In desktop mode, store token for polling and return a success page instead of redirecting.
+		// When no SPA is available to serve the /auth frontend route (e.g. Electron desktop mode),
+		// store token for polling and return a success page instead of redirecting.
 		// The Electron app polls /oidc-token-poll to retrieve the token into its own session.
-		if !config.UseInCluster {
+		hasSPA := spa.UseEmbeddedFiles || config.StaticDir != ""
+		if !hasSPA {
 			oidcResultMu.Lock()
 			oidcResultMap[oauthConfig.Cluster] = &oidcAuthResult{
 				Token:   rawUserToken,
