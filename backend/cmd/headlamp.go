@@ -665,17 +665,6 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 		oauthMu         sync.Mutex
 	)
 
-	type oidcAuthResult struct {
-		Token   string
-		Cluster string
-		Created time.Time
-	}
-
-	var (
-		oidcResultMap = make(map[string]*oidcAuthResult)
-		oidcResultMu  sync.Mutex
-	)
-
 	r.HandleFunc("/oidc", func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 		cluster := r.URL.Query().Get("cluster")
@@ -870,29 +859,6 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 			return
 		}
 
-		// Set auth cookie (used by web mode and also by the system browser response in desktop mode)
-		auth.SetTokenCookie(w, r, oauthConfig.Cluster, rawUserToken, config.BaseURL, config.SessionTTL)
-
-		// In desktop mode, store token for polling and return a success page instead of redirecting.
-		// The Electron app polls /oidc-token-poll to retrieve the token into its own session.
-		if !config.UseInCluster {
-			oidcResultMu.Lock()
-			oidcResultMap[oauthConfig.Cluster] = &oidcAuthResult{
-				Token:   rawUserToken,
-				Cluster: oauthConfig.Cluster,
-				Created: time.Now(),
-			}
-			oidcResultMu.Unlock()
-
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			io.WriteString(w, //nolint:errcheck
-				"<!DOCTYPE html><html><body>"+
-					"<p>Authentication successful. You can close this window.</p>"+
-					"</body></html>")
-
-			return
-		}
-
 		var redirectURL string
 		if config.DevMode {
 			redirectURL = "http://localhost:3000/"
@@ -905,50 +871,13 @@ func createHeadlampHandler(config *HeadlampConfig) http.Handler {
 			redirectURL += baseURL + "/"
 		}
 
+		// Set auth cookie
+		auth.SetTokenCookie(w, r, oauthConfig.Cluster, rawUserToken, config.BaseURL, config.SessionTTL)
+
 		redirectURL += fmt.Sprintf("auth?cluster=%1s", oauthConfig.Cluster)
 
 		http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 	})
-
-	// Poll endpoint for desktop mode: Electron fetches this to retrieve the OIDC token
-	// into its own HTTP session after the user authenticates in the system browser.
-	r.HandleFunc("/oidc-token-poll", func(w http.ResponseWriter, r *http.Request) {
-		cluster := r.URL.Query().Get("cluster")
-		if cluster == "" {
-			http.Error(w, "cluster parameter is required", http.StatusBadRequest)
-			return
-		}
-
-		oidcResultMu.Lock()
-
-		// Clean up expired entries
-		for k, v := range oidcResultMap {
-			if time.Since(v.Created) > 5*time.Minute {
-				delete(oidcResultMap, k)
-			}
-		}
-
-		result, ok := oidcResultMap[cluster]
-		if ok {
-			delete(oidcResultMap, cluster)
-		}
-
-		oidcResultMu.Unlock()
-
-		if !ok {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprint(w, `{"status":"pending"}`)
-
-			return
-		}
-
-		// Set the cookie in the Electron session (the request comes from Electron's fetch())
-		auth.SetTokenCookie(w, r, result.Cluster, result.Token, config.BaseURL, config.SessionTTL)
-
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"success","cluster":%q}`, result.Cluster)
-	}).Methods("GET").Queries("cluster", "{cluster}")
 
 	// Serve the frontend if needed
 	if spa.UseEmbeddedFiles {
