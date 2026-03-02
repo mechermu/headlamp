@@ -36,14 +36,22 @@ const defaultOauthPopupProps = {
   title: '',
 };
 
+const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
 const OauthPopup: React.FC<OauthPopupProps> = props => {
   let externalWindow: Window | null;
+  const pollIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
 
   React.useEffect(
     () => {
       return () => {
         if (externalWindow) {
           externalWindow.close();
+        }
+        if (pollIntervalRef.current !== null) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
         }
       };
     },
@@ -60,24 +68,61 @@ const OauthPopup: React.FC<OauthPopupProps> = props => {
 
     externalWindow = window.open(url, title, windowFeatures);
 
-    const storageListener = () => {
-      try {
-        const authStatus = localStorage.getItem('auth_status');
-        if (authStatus) {
-          onCode(authStatus);
-          localStorage.removeItem('auth_status');
-          if (externalWindow) {
-            externalWindow.close();
+    if (window.desktopApi) {
+      // Desktop (Electron) mode: poll the backend for the token.
+      // The system browser handles the OIDC flow; Electron polls to retrieve the token
+      // into its own session via Set-Cookie on the poll response.
+      const clusterParam = new URL(url, window.location.href).searchParams.get('cluster') ?? '';
+      const pollStart = Date.now();
+
+      pollIntervalRef.current = setInterval(async () => {
+        if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+          if (pollIntervalRef.current !== null) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
           }
+          return;
+        }
+
+        try {
+          const resp = await fetch(`/oidc-token-poll?cluster=${encodeURIComponent(clusterParam)}`, {
+            credentials: 'include',
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data.status === 'success') {
+              if (pollIntervalRef.current !== null) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+              }
+              onCode('success');
+            }
+          }
+        } catch (e) {
+          console.log('error polling oidc-token-poll', e);
+        }
+      }, POLL_INTERVAL_MS);
+    } else {
+      // Web mode: listen for localStorage change set by the OIDC callback page.
+      const storageListener = () => {
+        try {
+          const authStatus = localStorage.getItem('auth_status');
+          if (authStatus) {
+            onCode(authStatus);
+            localStorage.removeItem('auth_status');
+            if (externalWindow) {
+              externalWindow.close();
+            }
+            window.removeEventListener('storage', storageListener);
+          }
+        } catch (e) {
+          console.log('error occured while closing auth window', e);
           window.removeEventListener('storage', storageListener);
         }
-      } catch (e) {
-        console.log('error occured while closing auth window', e);
-        window.removeEventListener('storage', storageListener);
-      }
-    };
+      };
 
-    window.addEventListener('storage', storageListener);
+      window.addEventListener('storage', storageListener);
+    }
 
     if (externalWindow) {
       try {
